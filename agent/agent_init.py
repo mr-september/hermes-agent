@@ -1858,26 +1858,36 @@ def init_agent(
     if not skip_memory:
         try:
             _mem_provider_name = mem_config.get("provider", "") if mem_config else ""
+            # Support multiple coexisting providers: a YAML list or a
+            # comma-separated string (e.g. "hindsight,vault"). The vault
+            # provider is designed to run alongside hindsight — see
+            # Concepts/Memory-Architecture.md. A bare string is treated as
+            # a single provider (backward compatible).
+            if isinstance(_mem_provider_name, (list, tuple)):
+                _mem_provider_names = [str(n).strip() for n in _mem_provider_name if str(n).strip()]
+            elif isinstance(_mem_provider_name, str) and _mem_provider_name.strip():
+                _mem_provider_names = [n.strip() for n in _mem_provider_name.split(",") if n.strip()]
+            else:
+                _mem_provider_names = []
 
-            if _mem_provider_name and _mem_provider_name.strip():
+            if _mem_provider_names:
                 from agent.memory_manager import MemoryManager as _MemoryManager
                 from plugins.memory import load_memory_provider as _load_mem
                 agent._memory_manager = _MemoryManager()
-                _mp = _load_mem(_mem_provider_name)
-                if _mp and _mp.is_available():
-                    agent._memory_manager.add_provider(_mp)
-                elif _mp is not None:
-                    # Skip the (potentially expensive) unavailable_reason() call
-                    # if we've already warned for this provider — the gateway
-                    # builds a fresh AIAgent per message, so without this guard
-                    # unavailable_reason() (which reads config from disk and may
-                    # probe importlib) runs on every turn.
-                    if _mem_provider_name not in _warned_unavailable_providers:
-                        try:
-                            _unavailable_reason = _mp.unavailable_reason()
-                        except Exception:
-                            _unavailable_reason = ""
-                        _warn_memory_provider_unavailable(_mem_provider_name, _unavailable_reason)
+                for _pn in _mem_provider_names:
+                    try:
+                        _mp = _load_mem(_pn)
+                        if _mp and _mp.is_available():
+                            agent._memory_manager.add_provider(_mp)
+                        elif _mp is not None:
+                            if _pn not in _warned_unavailable_providers:
+                                try:
+                                    _unavailable_reason = _mp.unavailable_reason()
+                                except Exception:
+                                    _unavailable_reason = ""
+                                _warn_memory_provider_unavailable(_pn, _unavailable_reason)
+                    except Exception as _lpe:
+                        _ra().logger.warning("Memory provider '%s' failed to load: %s", _pn, _lpe)
                 if agent._memory_manager.providers:
                     _init_kwargs = {
                         "session_id": agent.session_id,

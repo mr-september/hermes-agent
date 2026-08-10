@@ -410,19 +410,44 @@ class MemoryManager:
         """
         is_builtin = provider.name == "builtin"
 
+        # Allow a small, explicitly-blessed set of external providers to
+        # coexist. Historically only ONE external provider was permitted
+        # (to avoid tool-schema bloat / conflicting backends). That guard
+        # is still enforced for *arbitrary* second providers, but the
+        # built-in ``vault`` provider (Obsidian file-backed deep store) is
+        # intentionally designed to run ALONGSIDE ``hindsight`` — they fill
+        # different niches (curated vault recall vs semantic auto-extraction)
+        # and never register conflicting tool names. See Concepts/Memory-Architecture.md.
+        _COEXISTING_EXTERNAL = {"hindsight", "vault"}
+
         if not is_builtin:
-            if self._has_external:
+            if self._has_external and provider.name not in _COEXISTING_EXTERNAL:
                 existing = next(
                     (p.name for p in self._providers if p.name != "builtin"), "unknown"
                 )
                 logger.warning(
                     "Rejected memory provider '%s' — external provider '%s' is "
                     "already registered. Only one external memory provider is "
-                    "allowed at a time. Configure which one via memory.provider "
+                    "allowed at a time (unless explicitly blessed to coexist, "
+                    "e.g. hindsight+vault). Configure which one via memory.provider "
                     "in config.yaml.",
                     provider.name, existing,
                 )
                 return
+            # If a second blessed provider is being added, the existing one
+            # must also be blessed (otherwise we'd be mixing a blessed pair
+            # with an un-blessed one). Guard that.
+            if self._has_external:
+                _existing_external = next(
+                    (p.name for p in self._providers if p.name != "builtin"), None
+                )
+                if _existing_external and _existing_external not in _COEXISTING_EXTERNAL:
+                    logger.warning(
+                        "Rejected memory provider '%s' — cannot mix blessed "
+                        "coexistent provider '%s' with non-coexistent provider '%s'.",
+                        provider.name, provider.name, _existing_external,
+                    )
+                    return
             self._has_external = True
 
         self._providers.append(provider)

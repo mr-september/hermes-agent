@@ -1612,6 +1612,9 @@ class HindsightMemoryProvider(MemoryProvider):
         self._thread_id = str(kwargs.get("thread_id") or "").strip()
         self._agent_identity = str(kwargs.get("agent_identity") or "").strip()
         self._agent_workspace = str(kwargs.get("agent_workspace") or "").strip()
+        # Track the agent context so on_memory_write can skip cron/non-primary
+        # contexts (avoid mirroring cron self-noise into the bank).
+        self._agent_context = str(kwargs.get("agent_context") or "primary").strip()
         self._turn_index = 0
         self._session_turns = []
         self._last_retained_turn_count = 0
@@ -2166,6 +2169,72 @@ class HindsightMemoryProvider(MemoryProvider):
             self._status_callback(f"{_HINDSIGHT_GLYPH} Hindsight — saving to memory…")
         except Exception:
             logger.debug("Retain indicator emit failed (non-fatal)", exc_info=True)
+
+    def on_memory_write(
+        self,
+        action: str,
+        target: str,
+        content: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """FORWARD SYNC — mirror built-in MEMORY.md/USER.md writes into the bank.
+
+        This is the missing link that makes Hindsight aware of the agent's
+        curated hot-cache facts (Design 1: MEMORY.md is canonical, Hindsight is
+        complementary semantic recall). Without it, the two stores were fully
+        isolated — Hindsight only retained conversation transcripts, and never
+        saw the durable facts the agent deliberately saved via the `memory`
+        tool. Now those facts are retained to the bank (tagged
+        ``source:memory_tool``) so Hindsight's prefetch/recall can surface them.
+
+        Non-blocking: enqueues on the same single-writer thread as sync_turn.
+        Skipped in cron/non-primary contexts to avoid self-noise.
+        """
+        if self._agent_context != "primary":
+            return
+        if action not in ("add", "replace"):
+            return
+        if target not in ("memory", "user"):
+            return
+        if not content or not content.strip():
+            return
+        # Skip if the provider is disabled or not yet initialized.
+        if getattr(self, "_mode", None) == "disabled":
+            return
+        if self._shutting_down.is_set():
+            return
+        text = content.strip()
+        # Tag so the fact is traceable to the hot cache, and scope it as an
+        # observation (matches default recall_types) so it is recalled.
+        tags = ["source:memory_tool", f"target:{target}"]
+        if target == "user":
+            # User-profile facts are high-value; keep them recallable.
+            tags.append("user_profile")
+
+        def _do_retain_fact() -> None:
+            try:
+                item = self._build_retain_kwargs(
+                    text,
+                    context=self._retain_context,
+                    metadata=self._build_metadata(message_count=1, turn_index=self._turn_index),
+                    tags=tags,
+                    retain_async=self._retain_async,
+                )
+                item.pop("bank_id", None)
+                item.pop("retain_async", None)
+                self._run_hindsight_operation(
+                    lambda client: client.aretain_batch(bank_id=self._bank_id, items=[item])
+                )
+                logger.debug("Hindsight forward-sync retained memory fact (%d chars, target=%s)", len(text), target)
+            except Exception as e:  # pragma: no cover - defensive; keep stores isolated on failure
+                logger.debug("Hindsight on_memory_write retain failed (non-fatal): %s", e)
+
+        try:
+            self._ensure_writer()
+            self._register_atexit()
+            self._retain_queue.put(_do_retain_fact)
+        except Exception as e:
+            logger.debug("Hindsight on_memory_write enqueue failed (non-fatal): %s", e)
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         if self._memory_mode == "context":
