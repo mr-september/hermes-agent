@@ -1,0 +1,8 @@
+name: vault
+version: 1.0.0
+description: "Vault — Obsidian file-backed deep store. Proactive recall (prefetch) + explicit vault_search/vault_read tools + bridges built-in MEMORY.md writes into structured vault notes. Runs alongside Hindsight (different niches: curated vault recall vs semantic auto-extraction)."
+pip_dependencies: []
+requires_env: []
+hooks:
+  - on_memory_write
+  - on_session_end
