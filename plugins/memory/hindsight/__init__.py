@@ -761,6 +761,23 @@ def _resolve_hermes_model() -> dict[str, str] | None:
         # no per-provider special cases here.
         if not base_url:
             base_url = cfg_get(hermes_cfg, "model", "base_url", default="") or ""
+        if not base_url:
+            # Path 3: built-in providers carry their endpoints inside Hermes
+            # (nothing in config.yaml). Table of canonical OpenAI-compatible
+            # endpoints so the follow-the-active-model path works for them too;
+            # unknown/keyless providers still fall through to static config.
+            _BUILTIN_OPENAI_COMPATIBLE_ENDPOINTS = {
+                "openrouter": "https://openrouter.ai/api/v1",
+                "openai": "https://api.openai.com/v1",
+                "groq": "https://api.groq.com/openai/v1",
+                "together": "https://api.together.xyz/v1",
+                "deepseek": "https://api.deepseek.com/v1",
+                "mistral": "https://api.mistral.ai/v1",
+                "xai": "https://api.x.ai/v1",
+            }
+            base_url = _BUILTIN_OPENAI_COMPATIBLE_ENDPOINTS.get(
+                str(hermes_provider_name).lower(), ""
+            )
         if not api_key:
             from agent.secret_scope import get_secret as _get_secret
 
