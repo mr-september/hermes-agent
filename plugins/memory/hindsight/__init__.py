@@ -726,6 +726,62 @@ def _resolve_bank_id_template(template: str, fallback: str, **placeholders: str)
 # MemoryProvider implementation
 # ---------------------------------------------------------------------------
 
+def _resolve_hermes_model() -> dict[str, str] | None:
+    """Read Hermes' live config.yaml and resolve the current model to Hindsight params.
+
+    Returns dict with llm_provider, llm_model, llm_base_url, llm_api_key,
+    or None if Hermes config can't be read or the active model has no
+    configured provider credentials.
+    """
+    try:
+        from hermes_cli.config import load_config_readonly, cfg_get
+
+        hermes_cfg = load_config_readonly()
+        hermes_provider_name = cfg_get(hermes_cfg, "model", "provider", default="")
+        hermes_model_name = cfg_get(hermes_cfg, "model", "default", default="")
+
+        if not hermes_provider_name or not hermes_model_name:
+            return None
+
+        # Path 1: dedicated provider entry (e.g. inferx-deepseek-v4-flash,
+        # qwen3.6-hauhaucs/LM Studio, together-ds-v4p).
+        providers = hermes_cfg.get("providers", {})
+        provider_cfg = providers.get(hermes_provider_name, {})
+
+        base_url = ""
+        api_key = ""
+        if provider_cfg:
+            base_url = provider_cfg.get("api", "")
+            api_key = provider_cfg.get("api_key", "")
+
+        # Path 2: standard top-level model config (e.g. openrouter) —
+        # endpoint lives at model.base_url, key in .env as <PROVIDER>_API_KEY
+        # resolved through Hermes' sealed secret scope (same source Hermes
+        # itself uses). Keeps Hindsight on ONE follow-the-active-model path;
+        # no per-provider special cases here.
+        if not base_url:
+            base_url = cfg_get(hermes_cfg, "model", "base_url", default="") or ""
+        if not api_key:
+            from agent.secret_scope import get_secret as _get_secret
+
+            api_key = _get_secret(f"{hermes_provider_name.upper()}_API_KEY", "")
+
+        if not base_url or not api_key:
+            # No resolvable credentials for the active model (e.g. Nous OAuth
+            # has no static key) — caller falls back to static hindsight config.
+            return None
+
+        return {
+            "llm_provider": "openai_compatible",
+            "llm_model": hermes_model_name,
+            "llm_base_url": base_url,
+            "llm_api_key": api_key,
+        }
+    except Exception as exc:
+        logger.debug("Could not resolve Hermes model for Hindsight: %s", exc)
+        return None
+
+
 class HindsightMemoryProvider(MemoryProvider):
     """Hindsight long-term memory with knowledge graph and multi-strategy retrieval."""
 
@@ -1228,19 +1284,37 @@ class HindsightMemoryProvider(MemoryProvider):
                     raise ImportError(str(_e))
                 from hindsight import HindsightEmbedded
                 HindsightEmbedded.__del__ = lambda self: None
-                llm_provider = self._config.get("llm_provider", "")
-                if llm_provider in {"openai_compatible", "openrouter"}:
-                    llm_provider = "openai"
-                logger.debug("Creating HindsightEmbedded client (profile=%s, provider=%s)",
-                             self._config.get("profile", "hermes"), llm_provider)
-                kwargs = dict(
-                    profile=self._config.get("profile", "hermes"),
-                    llm_provider=llm_provider,
-                    llm_api_key=self._config.get("llmApiKey") or self._config.get("llm_api_key") or get_secret("HINDSIGHT_LLM_API_KEY", ""),
-                    llm_model=self._config.get("llm_model", ""),
-                )
-                if self._llm_base_url:
-                    kwargs["llm_base_url"] = self._llm_base_url
+                # ---- Read Hermes' live model config ----
+                # Always use whatever model Hermes is currently using.
+                # Falls back to static hindsight/config.json if unavailable.
+                hermes_model = _resolve_hermes_model()
+                if hermes_model is not None:
+                    logger.info(
+                        "Hindsight using Hermes' live model: %s @ %s",
+                        hermes_model.get("llm_model"),
+                        hermes_model.get("llm_base_url"),
+                    )
+                    kwargs = dict(
+                        profile=self._config.get("profile", "hermes"),
+                        llm_provider="openai",
+                        llm_model=hermes_model["llm_model"],
+                        llm_api_key=hermes_model["llm_api_key"],
+                        llm_base_url=hermes_model["llm_base_url"],
+                    )
+                else:
+                    llm_provider = self._config.get("llm_provider", "")
+                    if llm_provider in {"openai_compatible", "openrouter"}:
+                        llm_provider = "openai"
+                    logger.debug("Creating HindsightEmbedded client (profile=%s, provider=%s) [static config]",
+                                 self._config.get("profile", "hermes"), llm_provider)
+                    kwargs = dict(
+                        profile=self._config.get("profile", "hermes"),
+                        llm_provider=llm_provider,
+                        llm_api_key=self._config.get("llmApiKey") or self._config.get("llm_api_key") or get_secret("HINDSIGHT_LLM_API_KEY", ""),
+                        llm_model=self._config.get("llm_model", ""),
+                    )
+                    if self._llm_base_url:
+                        kwargs["llm_base_url"] = self._llm_base_url
                 idle_timeout = _parse_int_setting(
                     self._config.get("idle_timeout")
                     if self._config.get("idle_timeout") is not None
