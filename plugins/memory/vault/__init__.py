@@ -51,10 +51,23 @@ _STOPWORDS = {
 
 
 def _vault_path() -> Path:
-    """Resolve the Obsidian vault root from env, else documented default."""
+    """Resolve the Obsidian vault root: env override > provider config > default."""
     env = os.environ.get("OBSIDIAN_VAULT_PATH", "").strip()
     if env:
         return Path(env)
+    # Desktop config panel writes <HERMES_HOME>/vault/config.json (flat JSON,
+    # per plugins/memory/config_schema.py STORAGE_FLAT_JSON contract).
+    try:
+        home = os.environ.get("HERMES_HOME", "").strip()
+        if home:
+            cfg = Path(home) / "vault" / "config.json"
+            if cfg.is_file():
+                data = json.loads(cfg.read_text(encoding="utf-8"))
+                p = str(data.get("vault_path", "")).strip() if isinstance(data, dict) else ""
+                if p:
+                    return Path(p)
+    except Exception:
+        pass  # malformed config falls through to the documented default
     # Fallback: the path used throughout the workspace.
     return Path(r"C:\Users\Jie\HermesMemory")
 
